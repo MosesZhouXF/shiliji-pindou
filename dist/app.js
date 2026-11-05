@@ -1,11 +1,11 @@
-import {countColors,validateProject,keepLargestRegion,addOutline} from './engine.js';
+import {countColors,validateProject,keepLargestRegion,addOutline,trimLightBorder} from './engine.js';
 const $=id=>document.getElementById(id);
 const names={cartoon:'卡通保边',photo:'照片保真',structure:'结构抽象',line:'黑白线稿',pixel:'像素原样'};
 const descriptions={cartoon:'格内颜色聚类，保护细轮廓和大色块。',photo:'线性光区域平均，保留明暗与色彩关系。',structure:'依据颜色与位置迭代聚合，简化复杂细节。',line:'保留深色结构，再进行黑白亮度分割。',pixel:'中心点取样，不平均混色，不清理杂点。'};
 let palette=[],paletteMap=new Map(),source=null,sourceName='花园里的小橘猫',project=null,mode='cartoon',tool='inspect',selected=null,zoom=1,worker=null,request=0,sourceRequest=0,generating=false,history=[],future=[],drawing=false,strokeSaved=false,debounce,toastTimer,originalUrl=null;
 const canvas=$('pattern'),ctx=canvas.getContext('2d');
 function toast(text){$('toast').textContent=text;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,4500);}
-function setBusy(value){generating=value;$('busy').hidden=!value;for(const id of ['generate','export-png','export-csv','export-project','keep-subject','add-stroke','stroke-color'])$(id).disabled=value||!project;$('generate').disabled=value||!source;}
+function setBusy(value){generating=value;$('busy').hidden=!value;for(const id of ['generate','export-png','export-csv','export-project','keep-subject','trim-light','add-stroke','stroke-color'])$(id).disabled=value||!project;$('generate').disabled=value||!source;}
 function snapshot(){if(project){history.push({...project,grid:project.grid.slice()});if(history.length>30)history.shift();future=[];}updateHistory();}
 function updateHistory(){$('undo').disabled=!history.length;$('redo').disabled=!future.length;}
 function colorHex(rgb){return '#'+rgb.map(v=>Math.round(v).toString(16).padStart(2,'0')).join('');}
@@ -52,6 +52,11 @@ $('add-stroke').onclick=()=>{
   const code=$('stroke-color').value;if(!paletteMap.has(code))return;
   const grid=addOutline(project.grid,project.width,project.height,code),added=grid.filter(Boolean).length-project.grid.filter(Boolean).length;
   if(!applyGridAction(grid,`已用 ${code} 添加一格外描边，共 ${added} 颗`))toast('没有可描边的外部透明格子；可先移除背景或用橡皮留出边距。');
+};
+$('trim-light').onclick=()=>{
+  if(!project||generating)return;
+  const grid=trimLightBorder(project.grid,project.width,project.height,palette),removed=project.grid.filter(Boolean).length-grid.filter(Boolean).length;
+  if(!applyGridAction(grid,`已清理 ${removed} 颗浅色外边，可再次点击逐层清理`))toast('外缘没有可清理的白色或近白色格；若已描边，请先撤销描边。');
 };
 $('stroke-color').onchange=()=>{$('stroke-swatch').style.background=paletteMap.get($('stroke-color').value)?.hex||'#000';};
 for(const b of document.querySelectorAll('[data-tool]'))b.onclick=()=>{setView(false);setTool(b.dataset.tool);};

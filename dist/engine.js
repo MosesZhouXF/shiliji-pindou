@@ -156,8 +156,7 @@ export function keepLargestRegion(grid,width,height) {
   const out=Array(grid.length).fill(null);for(const i of largest)out[i]=grid[i];return out;
 }
 
-export function addOutline(grid,width,height,code) {
-  // Only paint exterior transparent cells. Enclosed holes and original beads stay intact.
+function exteriorCells(grid,width,height) {
   const exterior=new Uint8Array(grid.length),queue=[];
   const add=i=>{if(exterior[i]||grid[i]!==null)return;exterior[i]=1;queue.push(i);};
   for(let x=0;x<width;x++){add(x);add((height-1)*width+x);}
@@ -166,7 +165,26 @@ export function addOutline(grid,width,height,code) {
     const i=queue[head],x=i%width,y=Math.floor(i/width);
     if(x)add(i-1);if(x<width-1)add(i+1);if(y)add(i-width);if(y<height-1)add(i+width);
   }
-  const out=grid.slice();
+  return {exterior,queue};
+}
+
+export function trimLightBorder(grid,width,height,palette) {
+  const light=new Set(palette.filter(p=>{const [l,a,b]=rgbToLab(p.rgb);return l>=92&&Math.hypot(a,b)<=14;}).map(p=>p.code));
+  const {exterior}=exteriorCells(grid,width,height),out=grid.slice();
+  for(let i=0;i<grid.length;i++){
+    if(!light.has(grid[i]))continue;
+    const x=i%width,y=Math.floor(i/width);let exposed=x===0||y===0||x===width-1||y===height-1;
+    for(let dy=-1;dy<=1&&!exposed;dy++)for(let dx=-1;dx<=1;dx++){
+      const xx=x+dx,yy=y+dy;if(xx>=0&&yy>=0&&xx<width&&yy<height&&exterior[yy*width+xx]){exposed=true;break;}
+    }
+    if(exposed)out[i]=null;
+  }
+  return out;
+}
+
+export function addOutline(grid,width,height,code) {
+  // Only paint exterior transparent cells. Enclosed holes and original beads stay intact.
+  const {queue}=exteriorCells(grid,width,height),out=grid.slice();
   for(const i of queue){
     const x=i%width,y=Math.floor(i/width);let touches=false;
     for(let dy=-1;dy<=1&&!touches;dy++)for(let dx=-1;dx<=1;dx++){
