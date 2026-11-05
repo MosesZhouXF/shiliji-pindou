@@ -34,6 +34,40 @@ export function removeBackground(data,w,h,tolerance=28) {
   return {data:out,removed:true,warning:''};
 }
 
+export function fitSubject(data,width,height,targetWidth,targetHeight) {
+  // Locate substantial connected regions instead of using stray background dots as crop bounds.
+  const labels=new Int32Array(width*height),queue=new Int32Array(width*height),parts=[];
+  for(let i=0;i<labels.length;i++){
+    if(labels[i]||data[i*4+3]<128)continue;
+    const id=parts.length+1,part={id,count:0,left:width,top:height,right:0,bottom:0};
+    let head=0,tail=1;queue[0]=i;labels[i]=id;
+    while(head<tail){
+      const p=queue[head++],x=p%width,y=Math.floor(p/width);part.count++;
+      part.left=Math.min(part.left,x);part.right=Math.max(part.right,x);part.top=Math.min(part.top,y);part.bottom=Math.max(part.bottom,y);
+      for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+        const xx=x+dx,yy=y+dy;if(xx<0||yy<0||xx>=width||yy>=height)continue;
+        const next=yy*width+xx;if(labels[next]||data[next*4+3]<128)continue;
+        labels[next]=id;queue[tail++]=next;
+      }
+    }
+    parts.push(part);
+  }
+  const unchanged={data,width,height,cropped:false};if(!parts.length)return unchanged;
+  parts.sort((a,b)=>b.count-a.count);const main=parts[0],reach=Math.max(main.right-main.left+1,main.bottom-main.top+1)*.18;
+  const kept=parts.filter(p=>p===main||p.count>=main.count*.08||(p.count>=Math.max(4,main.count*.003)&&Math.hypot(Math.max(0,main.left-p.right,p.left-main.right),Math.max(0,main.top-p.bottom,p.top-main.bottom))<=reach));
+  const left=Math.min(...kept.map(p=>p.left)),right=Math.max(...kept.map(p=>p.right)),top=Math.min(...kept.map(p=>p.top)),bottom=Math.max(...kept.map(p=>p.bottom));
+  const unit=Math.max((right-left+1)/Math.max(1,targetWidth-2),(bottom-top+1)/Math.max(1,targetHeight-2));
+  const cropWidth=Math.ceil(unit*targetWidth),cropHeight=Math.ceil(unit*targetHeight);
+  if(cropWidth>=width&&cropHeight>=height)return unchanged;
+  const x0=Math.floor((left+right+1-cropWidth)/2),y0=Math.floor((top+bottom+1-cropHeight)/2),out=new Uint8ClampedArray(cropWidth*cropHeight*4);
+  for(let y=0;y<cropHeight;y++){
+    const sy=y+y0;if(sy<0||sy>=height)continue;
+    const from=Math.max(0,x0),to=Math.min(width,x0+cropWidth);if(to<=from)continue;
+    out.set(data.subarray((sy*width+from)*4,(sy*width+to)*4),(y*cropWidth+from-x0)*4);
+  }
+  return {data:out,width:cropWidth,height:cropHeight,cropped:true};
+}
+
 function tiles(data,sw,sh,w,h,mode,outline) {
   const cells=[];
   for(let y=0;y<h;y++)for(let x=0;x<w;x++){
@@ -92,15 +126,16 @@ export function cleanSpeckles(grid,w,h,palette) {
 }
 
 export function convert({data,width:sw,height:sh,options,palette}) {
-  const {mode='cartoon',size=64,maxColors=18,outline=true,cleanup=true,background=false}=options;
+  const {mode='cartoon',size=64,maxColors=18,outline=true,cleanup=true,background=false,fit=false}=options;
   if(!['photo','cartoon','structure','line','pixel'].includes(mode))throw Error('不支持的算法');
   if(!Number.isInteger(size)||size<8||size>192||!Number.isInteger(maxColors)||maxColors<1||maxColors>291||!sw||!sh||data.length!==sw*sh*4)throw Error('转换参数无效');
   const w=Math.max(1,Math.round(sw/Math.max(sw,sh)*size)),h=Math.max(1,Math.round(sh/Math.max(sw,sh)*size));
   const bg=background?removeBackground(data,sw,sh):{data,warning:''};
-  const cells=mode==='structure'?structureSamples(bg.data,sw,sh,w,h):tiles(bg.data,sw,sh,w,h,mode,outline);
+  const prepared=fit?fitSubject(bg.data,sw,sh,w,h):{data:bg.data,width:sw,height:sh,cropped:false};
+  const cells=mode==='structure'?structureSamples(prepared.data,prepared.width,prepared.height,w,h):tiles(prepared.data,prepared.width,prepared.height,w,h,mode,outline);
   let grid=matchPalette(cells,palette,maxColors);
   if(cleanup&&mode!=='pixel'&&mode!=='line')grid=cleanSpeckles(grid,w,h,palette);
-  return {width:w,height:h,grid,warning:bg.warning,mode};
+  return {width:w,height:h,grid,warning:bg.warning,mode,fitted:prepared.cropped};
 }
 
 export function countColors(grid) {const m=new Map();for(const c of grid)if(c)m.set(c,(m.get(c)||0)+1);return [...m].map(([code,count])=>({code,count})).sort((a,b)=>b.count-a.count||a.code.localeCompare(b.code));}

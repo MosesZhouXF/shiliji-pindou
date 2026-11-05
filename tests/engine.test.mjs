@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {convert,rgbToLab,deltaE,removeBackground,matchPalette,countColors,cleanSpeckles,validateProject} from '../dist/engine.js';
+import {convert,rgbToLab,deltaE,removeBackground,matchPalette,countColors,cleanSpeckles,validateProject,fitSubject} from '../dist/engine.js';
 const palette=JSON.parse((await readFile(new URL('../dist/palette.json',import.meta.url),'utf8')).replace(/^\uFEFF/,''));
 const small=[{code:'black',rgb:[0,0,0]},{code:'white',rgb:[255,255,255]},{code:'red',rgb:[255,0,0]}];
 function image(w,h,fn){return Uint8ClampedArray.from(Array.from({length:w*h},(_,i)=>fn(i%w,Math.floor(i/w))).flat());}
@@ -14,3 +14,32 @@ test('ambiguous corners refuse background removal',()=>{const data=image(8,8,x=>
 test('palette cap never invents an unavailable bead code',()=>{const p=matchPalette([[251,5,0],[255,255,255],[10,10,10],null],small,1);assert.equal(new Set(p.filter(Boolean)).size,1);assert.equal(p[3],null);});
 test('speckle cleanup protects high-contrast eye pixels',()=>{const grid=Array(9).fill('white');grid[4]='black';assert.equal(cleanSpeckles(grid,3,3,small)[4],'black');});
 test('project validation rejects unknown colors, bad dimensions and grid lengths',()=>{const p={format:'douge-v1',width:2,height:1,grid:['red',null]};assert.deepEqual(validateProject(p,small).grid,p.grid);for(const invalid of [{...p,width:999},{...p,grid:['fake',null]},{...p,grid:['red']},{...p,format:'other'}])assert.throws(()=>validateProject(invalid,small));});
+
+test('fit subject uses the 60 × 60 grid instead of retaining transparent margins',()=>{
+  const data=image(120,120,(x,y)=>x>=40&&x<80&&y>=30&&y<90?[255,0,0,255]:[255,255,255,255]);
+  const p=convert({data,width:120,height:120,options:{mode:'pixel',size:60,maxColors:3,background:true,fit:true},palette:small});
+  const occupied=p.grid.map((v,i)=>v?i:-1).filter(i=>i>=0),xs=occupied.map(i=>i%60),ys=occupied.map(i=>Math.floor(i/60));
+  assert.equal(p.width,60);assert.equal(p.height,60);
+  assert.ok(Math.max(...ys)-Math.min(...ys)+1>=56,'subject should fill the height, with about one cell of padding');
+  assert.ok(Math.abs((Math.max(...xs)-Math.min(...xs)+1)/(Math.max(...ys)-Math.min(...ys)+1)-2/3)<.04,'keep subject proportions');
+});
+
+test('fit subject ignores isolated outer dots and keeps nearby decorative regions',()=>{
+  const data=image(120,120,(x,y)=>{
+    const main=x>=45&&x<85&&y>=30&&y<90,decoration=x>=34&&x<40&&y>=55&&y<61;
+    return main||decoration?[255,0,0,255]:(x===1&&y===1?[255,255,255,255]:[0,0,0,0]);
+  });
+  const cropped=fitSubject(data,120,120,60,60);
+  assert.ok(cropped.cropped);assert.ok(cropped.width<70&&cropped.height<70,'tiny corner noise must not expand the crop');
+  assert.equal(Array.from(cropped.data).filter((v,i)=>i%4===3&&v===255).length,40*60+6*6,'retain both the subject and detached decoration');
+});
+test('subject fitting handles empty and opaque images without introducing a border',()=>{
+  for(const alpha of [0,255]){const data=image(16,16,()=>[255,0,0,alpha]),result=fitSubject(data,16,16,60,60);assert.equal(result.cropped,false);assert.equal(result.data,data);}
+});
+test('subject fitting keeps the requested rectangular canvas and can be disabled',()=>{
+  const data=image(120,80,(x,y)=>x>=45&&x<75&&y>=20&&y<60?[255,0,0,255]:[0,0,0,0]);
+  const p=convert({data,width:120,height:80,options:{mode:'pixel',size:60,maxColors:3,fit:true},palette:small});
+  assert.equal(p.width,60);assert.equal(p.height,40);assert.equal(p.fitted,true);
+  const original=convert({data,width:120,height:80,options:{mode:'pixel',size:60,maxColors:3,fit:false},palette:small});
+  assert.equal(original.fitted,false);assert.ok(countColors(p.grid)[0].count>countColors(original.grid)[0].count);
+});
