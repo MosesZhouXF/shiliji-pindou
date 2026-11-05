@@ -195,5 +195,45 @@ export function addOutline(grid,width,height,code) {
   return out;
 }
 
+export function simplifyColors(grid,width,height,palette,strength='standard') {
+  const level={light:{cap:18,weight:30,passes:2,area:2},standard:{cap:12,weight:55,passes:3,area:4},strong:{cap:8,weight:80,passes:4,area:8}}[strength];
+  if(!level)throw Error('不支持的简化强度');
+  const used=new Set(grid.filter(Boolean)),pal=palette.filter(p=>used.has(p.code));
+  const colors=new Map(pal.map(p=>[p.code,p.rgb])),labs=new Map(pal.map(p=>[p.code,rgbToLab(p.rgb)])),costs=new Map();
+  const diff=(a,b)=>{const key=a+'|'+b;if(!costs.has(key))costs.set(key,deltaE(labs.get(a),labs.get(b)));return costs.get(key);};
+  const neighbors=i=>{const x=i%width,y=Math.floor(i/width),result=[];if(x)result.push(i-1);if(x<width-1)result.push(i+1);if(y)result.push(i-width);if(y<height-1)result.push(i+width);return result.filter(j=>grid[j]!==null);};
+  const out=matchPalette(grid.map(c=>c===null?null:colors.get(c)),pal,level.cap);
+  // Prefer coherent neighboring labels while keeping strong color boundaries in the original guide.
+  for(let pass=0;pass<level.passes;pass++)for(let step=0;step<out.length;step++){
+    const i=pass%2?out.length-1-step:step;if(grid[i]===null)continue;
+    const nb=neighbors(i);let best=out[i],score=Infinity;
+    for(const c of new Set([out[i],...nb.map(j=>out[j])])){
+      const d=diff(grid[i],c);if(c!==out[i]&&d>20)continue;
+      let energy=d*d;for(const j of nb)if(c!==out[j])energy+=level.weight*Math.exp(-((diff(grid[i],grid[j])/18)**2));
+      if(energy<score){score=energy;best=c;}
+    }
+    out[i]=best;
+  }
+  const source=out.slice(),seen=new Uint8Array(out.length),counts=new Map(countColors(source).map(p=>[p.code,p.count]));
+  // Merge tiny low-contrast islands; black eyes and other high-contrast accents are protected.
+  for(let start=0;start<out.length;start++){
+    if(source[start]===null||seen[start])continue;
+    const region=[start],border=new Map();seen[start]=1;
+    for(let head=0;head<region.length;head++)for(const j of neighbors(region[head])){
+      if(source[j]===source[start]){if(!seen[j]){seen[j]=1;region.push(j);}}
+      else border.set(source[j],(border.get(source[j])||0)+1);
+    }
+    if(region.length>level.area)continue;
+    let chosen=null,best=Infinity;
+    for(const [code,n]of border){
+      if(counts.get(code)<counts.get(source[start])||(counts.get(code)===counts.get(source[start])&&code.localeCompare(source[start])>=0))continue;
+      const d=diff(source[start],code);if(d>18)continue;
+      const cost=d*d/(1+Math.log2(1+n));if(cost<best){best=cost;chosen=code;}
+    }
+    if(chosen)for(const i of region)out[i]=chosen;
+  }
+  return out;
+}
+
 export function countColors(grid) {const m=new Map();for(const c of grid)if(c)m.set(c,(m.get(c)||0)+1);return [...m].map(([code,count])=>({code,count})).sort((a,b)=>b.count-a.count||a.code.localeCompare(b.code));}
 export function validateProject(p,palette) {const codes=new Set(palette.map(c=>c.code));if(p?.format!=='douge-v1'||!Number.isInteger(p.width)||!Number.isInteger(p.height)||p.width<1||p.height<1||p.width>192||p.height>192||!Array.isArray(p.grid)||p.grid.length!==p.width*p.height||p.grid.some(c=>c!==null&&!codes.has(c)))throw Error('图纸文件无效或包含不支持的色号');return {width:p.width,height:p.height,grid:p.grid.slice(),mode:p.mode||'cartoon'};}

@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {convert,rgbToLab,deltaE,removeBackground,matchPalette,countColors,cleanSpeckles,validateProject,fitSubject,keepLargestRegion,addOutline,trimLightBorder} from '../dist/engine.js';
+import {convert,rgbToLab,deltaE,removeBackground,matchPalette,countColors,cleanSpeckles,validateProject,fitSubject,keepLargestRegion,addOutline,trimLightBorder,simplifyColors} from '../dist/engine.js';
 const palette=JSON.parse((await readFile(new URL('../dist/palette.json',import.meta.url),'utf8')).replace(/^\uFEFF/,''));
 const small=[{code:'black',rgb:[0,0,0]},{code:'white',rgb:[255,255,255]},{code:'red',rgb:[255,0,0]}];
 function image(w,h,fn){return Uint8ClampedArray.from(Array.from({length:w*h},(_,i)=>fn(i%w,Math.floor(i/w))).flat());}
@@ -110,4 +110,30 @@ test('outlining a cleaned subject follows its color boundary without restoring t
   const grid=Array(49).fill(null);for(let y=1;y<=5;y++)for(let x=1;x<=5;x++)grid[y*7+x]='white';for(let y=2;y<=4;y++)for(let x=2;x<=4;x++)grid[y*7+x]='red';
   const result=addOutline(trimLightBorder(grid,7,7,small),7,7,'black');
   assert.equal(result.filter(c=>c==='white').length,0);assert.equal(result.filter(c=>c==='red').length,9);assert.equal(result.filter(c=>c==='black').length,16);
+});
+
+test('color simplification respects each cap, preserves silhouette and uses only existing bead colors',()=>{
+  const grid=Array.from({length:20*12},(_,i)=>i%13===0?null:palette[(i*7)%28].code),original=grid.slice(),used=new Set(grid.filter(Boolean));
+  for(const [strength,cap]of [['light',18],['standard',12],['strong',8]]){
+    const result=simplifyColors(grid,20,12,palette,strength);
+    assert.equal(result.length,grid.length);assert.ok(countColors(result).length<=cap);
+    assert.deepEqual(result.map(c=>c===null),grid.map(c=>c===null));
+    assert.ok(result.every(c=>c===null||used.has(c)));
+    assert.deepEqual(result,simplifyColors(grid,20,12,palette,strength),'same inputs give deterministic output');
+  }
+  assert.deepEqual(grid,original);
+});
+test('simplification merges low-contrast flecks and retains high-contrast eyes and highlights',()=>{
+  const pal=[{code:'gray',rgb:[170,160,160]},{code:'fleck',rgb:[180,170,170]},{code:'eye',rgb:[15,15,15]},{code:'highlight',rgb:[255,255,255]}];
+  const grid=Array(81).fill('gray');grid[20]='fleck';grid[60]='fleck';grid[30]='eye';grid[50]='highlight';
+  const result=simplifyColors(grid,9,9,pal,'standard');
+  assert.equal(result.filter(c=>c==='fleck').length,0);assert.equal(result[30],'eye');assert.equal(result[50],'highlight');
+});
+test('simplification preserves a thin high-contrast line and enclosed transparent holes',()=>{
+  const grid=Array.from({length:81},(_,i)=>i%9===4?'black':'white');grid[20]=null;
+  const result=simplifyColors(grid,9,9,small,'strong');assert.deepEqual(result,grid);
+});
+test('simplification handles empty images and rejects unsupported strength',()=>{
+  assert.deepEqual(simplifyColors(Array(9).fill(null),3,3,small),Array(9).fill(null));
+  assert.throws(()=>simplifyColors(['red'],1,1,small,'unsupported'));
 });
