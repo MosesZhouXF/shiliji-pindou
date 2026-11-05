@@ -138,5 +138,44 @@ export function convert({data,width:sw,height:sh,options,palette}) {
   return {width:w,height:h,grid,warning:bg.warning,mode,fitted:prepared.cropped};
 }
 
+export function keepLargestRegion(grid,width,height) {
+  const visited=new Uint8Array(grid.length);let largest=[];
+  for(let i=0;i<grid.length;i++){
+    if(visited[i]||grid[i]===null)continue;
+    const region=[i];visited[i]=1;
+    for(let head=0;head<region.length;head++){
+      const p=region[head],x=p%width,y=Math.floor(p/width);
+      for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+        const xx=x+dx,yy=y+dy;if(xx<0||yy<0||xx>=width||yy>=height)continue;
+        const next=yy*width+xx;if(visited[next]||grid[next]===null)continue;
+        visited[next]=1;region.push(next);
+      }
+    }
+    if(region.length>largest.length)largest=region;
+  }
+  const out=Array(grid.length).fill(null);for(const i of largest)out[i]=grid[i];return out;
+}
+
+export function addOutline(grid,width,height,code) {
+  // Only paint exterior transparent cells. Enclosed holes and original beads stay intact.
+  const exterior=new Uint8Array(grid.length),queue=[];
+  const add=i=>{if(exterior[i]||grid[i]!==null)return;exterior[i]=1;queue.push(i);};
+  for(let x=0;x<width;x++){add(x);add((height-1)*width+x);}
+  for(let y=0;y<height;y++){add(y*width);add(y*width+width-1);}
+  for(let head=0;head<queue.length;head++){
+    const i=queue[head],x=i%width,y=Math.floor(i/width);
+    if(x)add(i-1);if(x<width-1)add(i+1);if(y)add(i-width);if(y<height-1)add(i+width);
+  }
+  const out=grid.slice();
+  for(const i of queue){
+    const x=i%width,y=Math.floor(i/width);let touches=false;
+    for(let dy=-1;dy<=1&&!touches;dy++)for(let dx=-1;dx<=1;dx++){
+      const xx=x+dx,yy=y+dy;if(xx>=0&&yy>=0&&xx<width&&yy<height&&grid[yy*width+xx]!==null){touches=true;break;}
+    }
+    if(touches)out[i]=code;
+  }
+  return out;
+}
+
 export function countColors(grid) {const m=new Map();for(const c of grid)if(c)m.set(c,(m.get(c)||0)+1);return [...m].map(([code,count])=>({code,count})).sort((a,b)=>b.count-a.count||a.code.localeCompare(b.code));}
 export function validateProject(p,palette) {const codes=new Set(palette.map(c=>c.code));if(p?.format!=='douge-v1'||!Number.isInteger(p.width)||!Number.isInteger(p.height)||p.width<1||p.height<1||p.width>192||p.height>192||!Array.isArray(p.grid)||p.grid.length!==p.width*p.height||p.grid.some(c=>c!==null&&!codes.has(c)))throw Error('图纸文件无效或包含不支持的色号');return {width:p.width,height:p.height,grid:p.grid.slice(),mode:p.mode||'cartoon'};}

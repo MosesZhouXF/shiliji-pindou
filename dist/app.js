@@ -1,11 +1,11 @@
-import {countColors,validateProject} from './engine.js';
+import {countColors,validateProject,keepLargestRegion,addOutline} from './engine.js';
 const $=id=>document.getElementById(id);
 const names={cartoon:'卡通保边',photo:'照片保真',structure:'结构抽象',line:'黑白线稿',pixel:'像素原样'};
 const descriptions={cartoon:'格内颜色聚类，保护细轮廓和大色块。',photo:'线性光区域平均，保留明暗与色彩关系。',structure:'依据颜色与位置迭代聚合，简化复杂细节。',line:'保留深色结构，再进行黑白亮度分割。',pixel:'中心点取样，不平均混色，不清理杂点。'};
 let palette=[],paletteMap=new Map(),source=null,sourceName='花园里的小橘猫',project=null,mode='cartoon',tool='inspect',selected=null,zoom=1,worker=null,request=0,sourceRequest=0,generating=false,history=[],future=[],drawing=false,strokeSaved=false,debounce,toastTimer,originalUrl=null;
 const canvas=$('pattern'),ctx=canvas.getContext('2d');
 function toast(text){$('toast').textContent=text;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,4500);}
-function setBusy(value){generating=value;$('busy').hidden=!value;for(const id of ['generate','export-png','export-csv','export-project'])$(id).disabled=value||!project;$('generate').disabled=value||!source;}
+function setBusy(value){generating=value;$('busy').hidden=!value;for(const id of ['generate','export-png','export-csv','export-project','keep-subject','add-stroke','stroke-color'])$(id).disabled=value||!project;$('generate').disabled=value||!source;}
 function snapshot(){if(project){history.push({...project,grid:project.grid.slice()});if(history.length>30)history.shift();future=[];}updateHistory();}
 function updateHistory(){$('undo').disabled=!history.length;$('redo').disabled=!future.length;}
 function colorHex(rgb){return '#'+rgb.map(v=>Math.round(v).toString(16).padStart(2,'0')).join('');}
@@ -38,6 +38,22 @@ function paint(e){if(!project||generating)return;const cell=cellAt(e);if(!cell)r
 canvas.addEventListener('pointerdown',e=>{if(e.button!==0)return;drawing=true;strokeSaved=false;canvas.setPointerCapture(e.pointerId);paint(e);});canvas.addEventListener('pointermove',paint);function endStroke(){if(drawing){drawing=false;update();}}canvas.addEventListener('pointerup',endStroke);canvas.addEventListener('pointercancel',endStroke);
 function undo(){if(!history.length||generating)return;future.push({...project,grid:project.grid.slice()});project=history.pop();update();}function redo(){if(!future.length||generating)return;history.push({...project,grid:project.grid.slice()});project=future.pop();update();}
 $('undo').onclick=undo;$('redo').onclick=redo;document.addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'&&!['INPUT','TEXTAREA'].includes(e.target.tagName)){e.preventDefault();e.shiftKey?redo():undo();}});
+function applyGridAction(grid,message){
+  if(grid.every((c,i)=>c===project.grid[i]))return false;
+  snapshot();project={...project,grid};setView(false);update();toast(message);return true;
+}
+$('keep-subject').onclick=()=>{
+  if(!project||generating)return;
+  const grid=keepLargestRegion(project.grid,project.width,project.height),removed=project.grid.filter(Boolean).length-grid.filter(Boolean).length;
+  if(!applyGridAction(grid,`已保留主体，清除 ${removed} 颗脱离的拼豆`))toast('当前图纸没有脱离的部分；有背景时请先移除背景。');
+};
+$('add-stroke').onclick=()=>{
+  if(!project||generating)return;
+  const code=$('stroke-color').value;if(!paletteMap.has(code))return;
+  const grid=addOutline(project.grid,project.width,project.height,code),added=grid.filter(Boolean).length-project.grid.filter(Boolean).length;
+  if(!applyGridAction(grid,`已用 ${code} 添加一格外描边，共 ${added} 颗`))toast('没有可描边的外部透明格子；可先移除背景或用橡皮留出边距。');
+};
+$('stroke-color').onchange=()=>{$('stroke-swatch').style.background=paletteMap.get($('stroke-color').value)?.hex||'#000';};
 for(const b of document.querySelectorAll('[data-tool]'))b.onclick=()=>{setView(false);setTool(b.dataset.tool);};
 for(const b of document.querySelectorAll('[data-mode]'))b.onclick=()=>{mode=b.dataset.mode;for(const a of document.querySelectorAll('[data-mode]')){a.classList.toggle('selected',a===b);a.setAttribute('aria-pressed',String(a===b));}$('mode-description').textContent=descriptions[mode];setView(false);queueGenerate();};
 for(const id of ['size','colors'])$(id).addEventListener('input',()=>{$(id+'-value').value=$(id).value;queueGenerate();});for(const id of ['outline','cleanup','background','fit'])$(id).onchange=queueGenerate;$('generate').onclick=generate;$('grid-toggle').onchange=render;$('codes-toggle').onchange=render;$('view-pattern').onclick=()=>setView(false);$('view-original').onclick=()=>setView(true);
@@ -56,4 +72,4 @@ $('export-png').onclick=()=>{if(!project)return;const cell=28,pad=60,counts=coun
   for(let x=0;x<project.width;x++){c.fillStyle='#819079';c.font='9px sans-serif';c.fillText(String(x+1),pad+(x+.5)*cell,top-13);}for(let y=0;y<project.height;y++){c.fillStyle='#819079';c.font='9px sans-serif';c.fillText(String(y+1),pad-17,top+(y+.5)*cell);for(let x=0;x<project.width;x++){const code=project.grid[y*project.width+x],p=paletteMap.get(code);if(p){c.fillStyle=p.hex;c.fillRect(pad+x*cell,top+y*cell,cell,cell);c.fillStyle=p.rgb.reduce((s,v,i)=>s+v*[.2126,.7152,.0722][i],0)<145?'#fff':'#26372b';c.font='8px sans-serif';c.fillText(code,pad+(x+.5)*cell,top+(y+.5)*cell);}else{c.fillStyle='#fafbf8';c.fillRect(pad+x*cell,top+y*cell,cell,cell);}}}
   for(let x=0;x<=project.width;x++){c.strokeStyle=x%10===0?'#465b49':'#465b4944';c.lineWidth=x%10===0?1.5:.5;c.beginPath();c.moveTo(pad+x*cell,top);c.lineTo(pad+x*cell,top+project.height*cell);c.stroke();}for(let y=0;y<=project.height;y++){c.strokeStyle=y%10===0?'#465b49':'#465b4944';c.lineWidth=y%10===0?1.5:.5;c.beginPath();c.moveTo(pad,top+y*cell);c.lineTo(pad+project.width*cell,top+y*cell);c.stroke();}
   const ly=top+project.height*cell+37;c.textAlign='left';counts.forEach((item,i)=>{const x=pad+(i%cols)*160,y=ly+Math.floor(i/cols)*46;c.fillStyle=paletteMap.get(item.code).hex;c.fillRect(x,y,24,24);c.strokeStyle='#ddd';c.lineWidth=.5;c.strokeRect(x,y,24,24);c.fillStyle='#3c5941';c.font='12px sans-serif';c.fillText(`${item.code} · ${item.count} 颗`,x+32,y+13);});c.fillStyle='#96a18c';c.font='10px sans-serif';c.fillText('5 mm 拼豆 · 色号仅供参考，实物请对照色卡 · 拾粒集',pad,sheet.height-19);sheet.toBlob(blob=>{if(blob){download(blob,'png');toast('高清图纸已导出');}else toast('图纸过大，导出失败，请减少格数。');},'image/png');};
-try {const response=await fetch('./palette.json');if(!response.ok)throw Error('色板加载失败');palette=await response.json();palette=palette.map(p=>({...p,hex:colorHex(p.rgb)}));paletteMap=new Map(palette.map(p=>[p.code,p]));await setSource('./sample.svg','花园里的小橘猫',true);}catch(e){toast(e.message);$('busy').hidden=true;}
+try {const response=await fetch('./palette.json');if(!response.ok)throw Error('色板加载失败');palette=await response.json();palette=palette.map(p=>({...p,hex:colorHex(p.rgb)}));paletteMap=new Map(palette.map(p=>[p.code,p]));$('stroke-color').replaceChildren(...palette.map(p=>new Option(`${p.code} · ${p.hex.toUpperCase()}`,p.code)));$('stroke-color').value=paletteMap.has('H7')?'H7':palette[0].code;$('stroke-color').onchange();await setSource('./sample.svg','花园里的小橘猫',true);}catch(e){toast(e.message);$('busy').hidden=true;}

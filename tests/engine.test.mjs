@@ -1,7 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
-import {convert,rgbToLab,deltaE,removeBackground,matchPalette,countColors,cleanSpeckles,validateProject,fitSubject} from '../dist/engine.js';
+import {convert,rgbToLab,deltaE,removeBackground,matchPalette,countColors,cleanSpeckles,validateProject,fitSubject,keepLargestRegion,addOutline} from '../dist/engine.js';
 const palette=JSON.parse((await readFile(new URL('../dist/palette.json',import.meta.url),'utf8')).replace(/^\uFEFF/,''));
 const small=[{code:'black',rgb:[0,0,0]},{code:'white',rgb:[255,255,255]},{code:'red',rgb:[255,0,0]}];
 function image(w,h,fn){return Uint8ClampedArray.from(Array.from({length:w*h},(_,i)=>fn(i%w,Math.floor(i/w))).flat());}
@@ -42,4 +42,42 @@ test('subject fitting keeps the requested rectangular canvas and can be disabled
   assert.equal(p.width,60);assert.equal(p.height,40);assert.equal(p.fitted,true);
   const original=convert({data,width:120,height:80,options:{mode:'pixel',size:60,maxColors:3,fit:false},palette:small});
   assert.equal(original.fitted,false);assert.ok(countColors(p.grid)[0].count>countColors(original.grid)[0].count);
+});
+
+test('keep largest region removes every detached component without changing colors or positions',()=>{
+  const grid=Array(49).fill(null);grid[0]='red';grid[1]='white';grid[16]='red';grid[17]='black';grid[23]='white';grid[24]='red';grid[47]='black';
+  const result=keepLargestRegion(grid,7,7);
+  assert.deepEqual(result.map((c,i)=>c?i:-1).filter(i=>i>=0),[16,17,23,24]);
+  for(const i of [16,17,23,24])assert.equal(result[i],grid[i]);
+  assert.equal(grid[0],'red','input and undo snapshot stay unchanged');
+});
+test('largest region treats diagonal contacts as connected and resolves ties consistently',()=>{
+  const grid=Array(25).fill(null);grid[0]='red';grid[6]='black';grid[19]='white';grid[24]='red';
+  const result=keepLargestRegion(grid,5,5);
+  assert.equal(result[0],'red');assert.equal(result[6],'black');assert.equal(result[19],null);assert.equal(result[24],null);
+  assert.deepEqual(keepLargestRegion(Array(9).fill(null),3,3),Array(9).fill(null));
+});
+test('outline adds exactly one exterior layer in the chosen bead code',()=>{
+  const grid=Array(25).fill(null);grid[12]='red';
+  const result=addOutline(grid,5,5,'black');
+  assert.equal(result[12],'red');assert.equal(result.filter(c=>c==='black').length,8);assert.equal(result[0],null);
+  assert.deepEqual(countColors(result),[{code:'black',count:8},{code:'red',count:1}]);
+  assert.equal(grid.filter(Boolean).length,1,'input remains available to undo');
+});
+test('outline preserves enclosed holes and does not overwrite existing bead colors',()=>{
+  const grid=Array(49).fill(null);for(let y=2;y<=4;y++)for(let x=2;x<=4;x++)if(x!==3||y!==3)grid[y*7+x]='red';
+  const result=addOutline(grid,7,7,'black');
+  assert.equal(result[24],null);assert.equal(result.filter(c=>c==='red').length,8);assert.equal(result.filter(c=>c==='black').length,16);
+});
+test('outline clips safely at edges and handles empty or full canvases',()=>{
+  const grid=Array(9).fill(null);grid[0]='red';const result=addOutline(grid,3,3,'black');
+  assert.equal(result.length,9);assert.equal(result.filter(c=>c==='black').length,3);assert.equal(result[8],null);
+  assert.deepEqual(addOutline(Array(9).fill(null),3,3,'black'),Array(9).fill(null));
+  assert.deepEqual(addOutline(Array(9).fill('red'),3,3,'black'),Array(9).fill('red'));
+});
+test('postprocessed grids remain valid editable projects and preserve exact bead totals',()=>{
+  const grid=Array(25).fill(null);grid[12]='red';grid[0]='white';
+  const processed=addOutline(keepLargestRegion(grid,5,5),5,5,'black');
+  const p=validateProject({format:'douge-v1',width:5,height:5,grid:processed},small);
+  assert.equal(countColors(p.grid).reduce((n,c)=>n+c.count,0),p.grid.filter(Boolean).length);
 });
