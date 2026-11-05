@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
+import {preprocessImage} from '../dist/preprocess.js';
 import {convert,rgbToLab,deltaE,removeBackground,matchPalette,countColors,cleanSpeckles,validateProject,fitSubject,keepLargestRegion,addOutline,trimLightBorder,simplifyColors} from '../dist/engine.js';
 const palette=JSON.parse((await readFile(new URL('../dist/palette.json',import.meta.url),'utf8')).replace(/^\uFEFF/,''));
 const small=[{code:'black',rgb:[0,0,0]},{code:'white',rgb:[255,255,255]},{code:'red',rgb:[255,0,0]}];
@@ -136,4 +137,35 @@ test('simplification preserves a thin high-contrast line and enclosed transparen
 test('simplification handles empty images and rejects unsupported strength',()=>{
   assert.deepEqual(simplifyColors(Array(9).fill(null),3,3,small),Array(9).fill(null));
   assert.throws(()=>simplifyColors(['red'],1,1,small,'unsupported'));
+});
+
+test('source preprocessing preserves alpha, input buffers and representative-color limits',()=>{
+  const data=image(24,20,(x,y)=>[x*10,y*12,(x*7+y*11)%255,(x+y)%5===0?0:(x+y)%5===1?64:255]),original=data.slice();
+  for(const [strength,cap]of [['light',20],['standard',16],['strong',12]]){
+    const out=preprocessImage(data,24,20,strength,8),colors=new Set();
+    for(let i=0;i<24*20;i++){assert.equal(out[i*4+3],data[i*4+3]);if(data[i*4+3]>=128)colors.add(Array.from(out.slice(i*4,i*4+3)).join(','));else assert.deepEqual(out.slice(i*4,i*4+4),data.slice(i*4,i*4+4));}
+    assert.ok(colors.size<=cap);assert.deepEqual(out,preprocessImage(data,24,20,strength,8));
+  }
+  assert.deepEqual(data,original);
+});
+test('source preprocessing suppresses weak checker texture without losing a sharp ink line',()=>{
+  const data=image(32,24,(x,y)=>x===16?[20,20,20,255]:Array(3).fill(128+((x+y)%2?8:-8)).concat(255));
+  const out=preprocessImage(data,32,24,'standard',8);
+  let before=0,after=0;for(let y=4;y<20;y++)for(let x=4;x<12;x++){const i=(y*32+x)*4;before+=(data[i]-128)**2;after+=(out[i]-128)**2;}
+  assert.ok(after<before*.5,'source texture should be substantially reduced');
+  for(let y=2;y<22;y++)assert.ok(out[(y*32+16)*4]<55,'keep the dark line');
+});
+test('transparent background colors do not leak into preprocessed foreground',()=>{
+  const data=image(12,12,(x,y)=>x>=4&&x<=7&&y>=4&&y<=7?[240,170,140,255]:[0,0,0,0]);
+  const out=preprocessImage(data,12,12,'strong',8);
+  for(let i=0;i<144;i++)if(data[i*4+3])assert.deepEqual(Array.from(out.slice(i*4,i*4+4)),[240,170,140,255]);
+  assert.deepEqual(preprocessImage(new Uint8ClampedArray(16),2,2),new Uint8ClampedArray(16));
+});
+test('conversion exposes a source-resolution preprocessing preview before grid sampling',()=>{
+  const data=image(24,16,(x,y)=>[x*10,y*15,(x+y)*5,255]);
+  const input={data,width:24,height:16,palette:small};
+  const off=convert({...input,options:{size:8,maxColors:3}});assert.equal(off.preprocessed,null);
+  const on=convert({...input,options:{size:8,maxColors:3,preprocess:'standard'}});
+  assert.equal(on.width,8);assert.equal(on.height,5);assert.equal(on.preprocessed.width,24);assert.equal(on.preprocessed.height,16);assert.equal(on.preprocessed.data.length,24*16*4);assert.ok(countColors(on.grid).length<=3);
+  assert.throws(()=>convert({...input,options:{size:8,maxColors:3,preprocess:'invalid'}}));
 });

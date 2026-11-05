@@ -1,10 +1,7 @@
 // Pure conversion engine: the worker and Node tests share this module.
-export function rgbToLab(rgb) {
-  const [r,g,b]=rgb.map(v=>{v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4;});
-  const f=v=>v>.008856?Math.cbrt(v):7.787*v+16/116;
-  const x=f((r*.4124564+g*.3575761+b*.1804375)/.95047),y=f(r*.2126729+g*.7151522+b*.072175),z=f((r*.0193339+g*.119192+b*.9503041)/1.08883);
-  return [116*y-16,500*(x-y),200*(y-z)];
-}
+import {rgbToLab} from './color.js';
+import {preprocessImage} from './preprocess.js';
+export {rgbToLab} from './color.js';
 export function deltaE(a,b) {
   const rad=Math.PI/180, c1=Math.hypot(a[1],a[2]),c2=Math.hypot(b[1],b[2]),cm=(c1+c2)/2;
   const g=.5*(1-Math.sqrt(cm**7/(cm**7+25**7)));
@@ -126,16 +123,19 @@ export function cleanSpeckles(grid,w,h,palette) {
 }
 
 export function convert({data,width:sw,height:sh,options,palette}) {
-  const {mode='cartoon',size=64,maxColors=18,outline=true,cleanup=true,background=false,fit=false}=options;
+  const {mode='cartoon',size=64,maxColors=18,outline=true,cleanup=true,background=false,fit=false,preprocess='off'}=options;
   if(!['photo','cartoon','structure','line','pixel'].includes(mode))throw Error('不支持的算法');
+  if(!['off','light','standard','strong'].includes(preprocess))throw Error('不支持的原图预处理强度');
   if(!Number.isInteger(size)||size<8||size>192||!Number.isInteger(maxColors)||maxColors<1||maxColors>291||!sw||!sh||data.length!==sw*sh*4)throw Error('转换参数无效');
   const w=Math.max(1,Math.round(sw/Math.max(sw,sh)*size)),h=Math.max(1,Math.round(sh/Math.max(sw,sh)*size));
   const bg=background?removeBackground(data,sw,sh):{data,warning:''};
   const prepared=fit?fitSubject(bg.data,sw,sh,w,h):{data:bg.data,width:sw,height:sh,cropped:false};
-  const cells=mode==='structure'?structureSamples(prepared.data,prepared.width,prepared.height,w,h):tiles(prepared.data,prepared.width,prepared.height,w,h,mode,outline);
+  const preprocessed=preprocess==='off'?null:{width:prepared.width,height:prepared.height,data:preprocessImage(prepared.data,prepared.width,prepared.height,preprocess,size)};
+  const input=preprocessed?.data||prepared.data;
+  const cells=mode==='structure'?structureSamples(input,prepared.width,prepared.height,w,h):tiles(input,prepared.width,prepared.height,w,h,mode,outline);
   let grid=matchPalette(cells,palette,maxColors);
   if(cleanup&&mode!=='pixel'&&mode!=='line')grid=cleanSpeckles(grid,w,h,palette);
-  return {width:w,height:h,grid,warning:bg.warning,mode,fitted:prepared.cropped};
+  return {width:w,height:h,grid,warning:bg.warning,mode,fitted:prepared.cropped,preprocess,preprocessed};
 }
 
 export function keepLargestRegion(grid,width,height) {
