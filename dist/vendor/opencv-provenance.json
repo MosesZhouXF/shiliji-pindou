@@ -1,0 +1,8 @@
+{
+  "package": "@techstark/opencv-js",
+  "version": "5.0.0-release.1",
+  "integrity": "sha512-PIm+eB0MFtieXoNC2GRao0dv/02sehG+Nv2nSW5D6pQm6J/4WqvDHm0RyoqOmGYQm67jdGiaOdIeTShCY3PIUg==",
+  "sha256": "b873c8211421da7b9bf41ae157a923f05a46a0b8d3e5904c44c6f3ad6d39a1bd",
+  "source": "https://github.com/TechStark/opencv-js",
+  "license": "Apache-2.0"
+}

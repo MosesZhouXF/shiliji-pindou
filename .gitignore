@@ -1,3 +1,14 @@
 node_modules/
 .sites-local/
 *.tar.gz
+
+# Tencent Cloud EdgeOne
+.env
+.env.*
+.edgeone/*
+.tef_dist/*
+
+# Cloudflare Wrangler
+.wrangler/
+.dev.vars
+.dev.vars.*

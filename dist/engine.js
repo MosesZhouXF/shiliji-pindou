@@ -1,6 +1,7 @@
 // Pure conversion engine: the worker and Node tests share this module.
 import {rgbToLab} from './color.js';
 import {preprocessImage} from './preprocess.js';
+import {protectThinLines,accentWeights,refineRegions} from './refinement.js';
 export {rgbToLab} from './color.js';
 export function deltaE(a,b) {
   const rad=Math.PI/180, c1=Math.hypot(a[1],a[2]),c2=Math.hypot(b[1],b[2]),cm=(c1+c2)/2;
@@ -98,9 +99,9 @@ function structureSamples(data,sw,sh,w,h) {
   return centers.map(c=>c.rgb);
 }
 
-export function matchPalette(cells,palette,maxColors) {
+export function matchPalette(cells,palette,maxColors,importance=null) {
   const pal=palette.map(p=>({...p,lab:rgbToLab(p.rgb)})),hist=new Map();
-  for(const c of cells)if(c){const key=c.map(Math.round).join(',');if(!hist.has(key))hist.set(key,{rgb:c,lab:rgbToLab(c),n:0});hist.get(key).n++;}
+  for(let i=0;i<cells.length;i++){const c=cells[i];if(c){const key=c.map(Math.round).join(',');if(!hist.has(key))hist.set(key,{rgb:c,lab:rgbToLab(c),n:0});hist.get(key).n+=importance?importance[i]:1;}}
   const samples=[...hist.values()];if(!samples.length)return cells.map(()=>null);
   const nearest=lab=>{let best=0,d=Infinity;pal.forEach((p,i)=>{const e=deltaE(lab,p.lab);if(e<d){best=i;d=e;}});return best;};
   const weights=new Map();for(const s of samples){s.index=nearest(s.lab);weights.set(s.index,(weights.get(s.index)||0)+s.n);}
@@ -123,19 +124,23 @@ export function cleanSpeckles(grid,w,h,palette) {
 }
 
 export function convert({data,width:sw,height:sh,options,palette}) {
-  const {mode='cartoon',size=64,maxColors=18,outline=true,cleanup=true,background=false,fit=false,preprocess='off'}=options;
+  const {mode='cartoon',size=64,maxColors=18,outline=true,cleanup=true,background=false,fit=false,preprocess='off',processing={}}=options;
   if(!['photo','cartoon','structure','line','pixel'].includes(mode))throw Error('不支持的算法');
-  if(!['off','light','standard','strong'].includes(preprocess))throw Error('不支持的原图预处理强度');
+  if(!['off','light','standard','strong','custom'].includes(preprocess))throw Error('不支持的原图预处理强度');
   if(!Number.isInteger(size)||size<8||size>192||!Number.isInteger(maxColors)||maxColors<1||maxColors>291||!sw||!sh||data.length!==sw*sh*4)throw Error('转换参数无效');
+  const {mergeDistance=0,speckleArea=0,inkThreshold=90}=processing;
+  if(!Number.isFinite(mergeDistance)||mergeDistance<0||mergeDistance>15||!Number.isInteger(speckleArea)||speckleArea<0||speckleArea>8||!Number.isFinite(inkThreshold)||inkThreshold<45||inkThreshold>130)throw Error('精细处理参数无效');
   const w=Math.max(1,Math.round(sw/Math.max(sw,sh)*size)),h=Math.max(1,Math.round(sh/Math.max(sw,sh)*size));
   const bg=background?removeBackground(data,sw,sh):{data,warning:''};
   const prepared=fit?fitSubject(bg.data,sw,sh,w,h):{data:bg.data,width:sw,height:sh,cropped:false};
-  const preprocessed=preprocess==='off'?null:{width:prepared.width,height:prepared.height,data:preprocessImage(prepared.data,prepared.width,prepared.height,preprocess,size)};
+  const preprocessed=preprocess==='off'?null:{width:prepared.width,height:prepared.height,data:preprocessImage(prepared.data,prepared.width,prepared.height,preprocess,size,processing)};
   const input=preprocessed?.data||prepared.data;
-  const cells=mode==='structure'?structureSamples(input,prepared.width,prepared.height,w,h):tiles(input,prepared.width,prepared.height,w,h,mode,outline);
-  let grid=matchPalette(cells,palette,maxColors);
+  let cells=mode==='structure'?structureSamples(input,prepared.width,prepared.height,w,h):tiles(input,prepared.width,prepared.height,w,h,mode,mode==='cartoon'?false:outline);
+  if(mode==='cartoon'&&outline)cells=protectThinLines(cells,input,prepared.width,prepared.height,w,h,inkThreshold);
+  let grid=matchPalette(cells,palette,maxColors,mode==='cartoon'?accentWeights(cells,w,h):null);
   if(cleanup&&mode!=='pixel'&&mode!=='line')grid=cleanSpeckles(grid,w,h,palette);
-  return {width:w,height:h,grid,warning:bg.warning,mode,fitted:prepared.cropped,preprocess,preprocessed};
+  if(mode!=='pixel'&&mode!=='line'&&(mergeDistance||cleanup&&speckleArea))grid=refineRegions(grid,w,h,palette,deltaE,mergeDistance,cleanup?speckleArea:0);
+  return {width:w,height:h,grid,warning:bg.warning,mode,fitted:prepared.cropped,preprocess,processing:{...processing},preprocessed};
 }
 
 export function keepLargestRegion(grid,width,height) {
@@ -235,5 +240,21 @@ export function simplifyColors(grid,width,height,palette,strength='standard') {
   return out;
 }
 
+export function replaceColor(grid,from,to){
+  return grid.map(code=>from&&to&&code===from?to:code);
+}
+
+export function floodFill(grid,width,height,start,code){
+  const out=grid.slice();
+  if(!Number.isInteger(start)||start<0||start>=grid.length||width*height!==grid.length||out[start]===code)return out;
+  const target=out[start],queue=new Int32Array(grid.length);let head=0,tail=1;queue[0]=start;out[start]=code;
+  while(head<tail){
+    const i=queue[head++],x=i%width,y=Math.floor(i/width),neighbors=[];
+    if(x)neighbors.push(i-1);if(x<width-1)neighbors.push(i+1);if(y)neighbors.push(i-width);if(y<height-1)neighbors.push(i+width);
+    for(const j of neighbors)if(out[j]===target){out[j]=code;queue[tail++]=j;}
+  }
+  return out;
+}
+
 export function countColors(grid) {const m=new Map();for(const c of grid)if(c)m.set(c,(m.get(c)||0)+1);return [...m].map(([code,count])=>({code,count})).sort((a,b)=>b.count-a.count||a.code.localeCompare(b.code));}
-export function validateProject(p,palette) {const codes=new Set(palette.map(c=>c.code));if(p?.format!=='douge-v1'||!Number.isInteger(p.width)||!Number.isInteger(p.height)||p.width<1||p.height<1||p.width>192||p.height>192||!Array.isArray(p.grid)||p.grid.length!==p.width*p.height||p.grid.some(c=>c!==null&&!codes.has(c)))throw Error('图纸文件无效或包含不支持的色号');return {width:p.width,height:p.height,grid:p.grid.slice(),mode:p.mode||'cartoon'};}
+export function validateProject(p,palette) {const codes=new Set(palette.map(c=>c.code));if(p?.format!=='douge-v1'||!Number.isInteger(p.width)||!Number.isInteger(p.height)||p.width<1||p.height<1||p.width>192||p.height>192||!Array.isArray(p.grid)||p.grid.length!==p.width*p.height||p.grid.some(c=>c!==null&&!codes.has(c)))throw Error('图纸文件无效或包含不支持的色号');return {width:p.width,height:p.height,grid:p.grid.slice(),mode:p.mode||'cartoon',paletteId:typeof p.palette==='string'?p.palette:'MARD-291'};}

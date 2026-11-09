@@ -1,9 +1,12 @@
 import {rgbToLab} from './color.js';
 
 // Work on a source-resolution image, before it is reduced to the bead grid.
-export function preprocessImage(data,width,height,strength='standard',targetSize=64) {
-  const level={light:{passes:1,range:12,colors:20,radius:.22},standard:{passes:2,range:18,colors:16,radius:.38},strong:{passes:3,range:25,colors:12,radius:.55}}[strength];
+export function preprocessImage(data,width,height,strength='standard',targetSize=64,settings={}) {
+  const base={light:{passes:1,range:12,colors:20,radius:.22},standard:{passes:2,range:18,colors:16,radius:.38},strong:{passes:3,range:25,colors:12,radius:.55},custom:{passes:2,range:18,colors:32,radius:.38}}[strength];
+  const level=base&&{...base};
   if(!level||!Number.isInteger(width)||!Number.isInteger(height)||width<1||height<1||data.length!==width*height*4)throw Error('原图预处理参数无效');
+  if(settings.smoothing!==undefined){if(!Number.isFinite(settings.smoothing)||settings.smoothing<0||settings.smoothing>100)throw Error('去纹理强度无效');const t=settings.smoothing/100;level.passes=t===0?0:Math.ceil(t*3);level.range=8+t*22;level.radius=.1+t*.5;}
+  if(settings.sourceColors!==undefined){if(!Number.isInteger(settings.sourceColors)||settings.sourceColors<8||settings.sourceColors>64)throw Error('原图保留色数无效');level.colors=settings.sourceColors;}
   const n=width*height,guide=new Float32Array(n*3);let current=new Float32Array(n*3);
   for(let i=0;i<n;i++){const c=[data[i*4],data[i*4+1],data[i*4+2]];current.set(c,i*3);if(data[i*4+3]>=128)guide.set(rgbToLab(c),i*3);}
   const radius=Math.max(1,Math.min(5,Math.round(Math.max(width,height)/targetSize*level.radius))),offsets=[];

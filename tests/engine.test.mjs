@@ -2,6 +2,7 @@ import {test} from 'node:test';
 import assert from 'node:assert/strict';
 import {readFile} from 'node:fs/promises';
 import {preprocessImage} from '../dist/preprocess.js';
+import {protectThinLines,refineRegions} from '../dist/refinement.js';
 import {convert,rgbToLab,deltaE,removeBackground,matchPalette,countColors,cleanSpeckles,validateProject,fitSubject,keepLargestRegion,addOutline,trimLightBorder,simplifyColors} from '../dist/engine.js';
 const palette=JSON.parse((await readFile(new URL('../dist/palette.json',import.meta.url),'utf8')).replace(/^\uFEFF/,''));
 const small=[{code:'black',rgb:[0,0,0]},{code:'white',rgb:[255,255,255]},{code:'red',rgb:[255,0,0]}];
@@ -168,4 +169,49 @@ test('conversion exposes a source-resolution preprocessing preview before grid s
   const on=convert({...input,options:{size:8,maxColors:3,preprocess:'standard'}});
   assert.equal(on.width,8);assert.equal(on.height,5);assert.equal(on.preprocessed.width,24);assert.equal(on.preprocessed.height,16);assert.equal(on.preprocessed.data.length,24*16*4);assert.ok(countColors(on.grid).length<=3);
   assert.throws(()=>convert({...input,options:{size:8,maxColors:3,preprocess:'invalid'}}));
+});
+
+test('automatic fine-line protection finds isolated ink without coordinates and preserves filled shapes',()=>{
+  const data=image(128,64,(x,y)=>{
+    const filled=x>=8&&x<40&&y>=8&&y<40;
+    const stroke=x>=72&&x<=87&&y>=25&&y<=27;
+    return filled||stroke?[30,25,25,255]:[255,226,206,255];
+  });
+  const base=convert({data,width:128,height:64,options:{mode:'cartoon',size:16,maxColors:4,outline:false,cleanup:false},palette});
+  const guarded=convert({data,width:128,height:64,options:{mode:'cartoon',size:16,maxColors:4,outline:true,cleanup:false},palette});
+  const isDark=c=>{const rgb=palette.find(p=>p.code===c).rgb;return rgb[0]+rgb[1]+rgb[2]<200;};
+  assert.equal(base.grid.slice(3*16+9,3*16+11).filter(isDark).length,0);
+  assert.equal(guarded.grid.slice(3*16+9,3*16+11).filter(isDark).length,2,'retain the narrow stroke on a bright background');
+  for(let y=1;y<5;y++)for(let x=1;x<5;x++)assert.ok(isDark(guarded.grid[y*16+x]),'do not skeletonize a filled shape');
+  const cells=Array(128).fill(null);assert.deepEqual(protectThinLines(cells,data,128,64,16,8),cells,'never fill a transparent grid cell');
+});
+
+test('fine-line extraction does not mutate source colors, input cells or their alpha mask',()=>{
+  const data=image(80,64,(x,y)=>[x>=30&&x<46&&y>=24&&y<27?20:240,150,150,x<5?0:255]),original=data.slice();
+  const cells=Array.from({length:80},(_,i)=>i%10===0?null:[240,150,150]),before=structuredClone(cells);
+  const out=protectThinLines(cells,data,80,64,10,8);
+  assert.deepEqual(data,original);assert.deepEqual(cells,before);assert.deepEqual(out.map(c=>c===null),cells.map(c=>c===null));
+});
+
+test('configurable region cleanup merges near colors and flecks while keeping eyes and transparency',()=>{
+  const pal=[{code:'base',rgb:[200,180,180]},{code:'near',rgb:[205,184,184]},{code:'fleck',rgb:[170,150,150]},{code:'ink',rgb:[20,20,20]}];
+  const grid=Array(81).fill('base');grid[0]=null;grid[10]='near';grid[20]='fleck';grid[40]='ink';const original=grid.slice();
+  const off=refineRegions(grid,9,9,pal,deltaE,0,0);assert.deepEqual(off,grid);
+  const merged=refineRegions(grid,9,9,pal,deltaE,5,0);assert.equal(merged[10],'base');assert.equal(merged[20],'fleck');
+  const cleaned=refineRegions(grid,9,9,pal,deltaE,5,2);assert.equal(cleaned[20],'base');assert.equal(cleaned[40],'ink');assert.equal(cleaned[0],null);assert.deepEqual(grid,original);
+});
+
+test('custom preprocessing independently controls color budget and validates tuning parameters',()=>{
+  const data=image(24,24,(x,y)=>[x*10,y*10,(x+y)*5,(x+y)%4?255:0]);
+  const out=preprocessImage(data,24,24,'custom',8,{smoothing:0,sourceColors:8});
+  const colors=new Set();for(let i=0;i<576;i++){assert.equal(out[i*4+3],data[i*4+3]);if(out[i*4+3]>=128)colors.add(Array.from(out.slice(i*4,i*4+3)).join(','));}assert.ok(colors.size<=8);
+  for(const settings of [{smoothing:-1},{smoothing:101},{sourceColors:7},{sourceColors:65}])assert.throws(()=>preprocessImage(data,24,24,'custom',8,settings));
+  for(const processing of [{mergeDistance:-1},{mergeDistance:16},{speckleArea:9},{speckleArea:1.5},{inkThreshold:0}])assert.throws(()=>convert({data,width:24,height:24,palette,options:{size:8,maxColors:4,processing}}));
+});
+
+test('the tuned automatic pipeline remains deterministic and respects the requested bead color cap',()=>{
+  const data=image(40,32,(x,y)=>[x*6,y*7,(x*3+y*9)%255,x<2?0:255]);
+  const input={data,width:40,height:32,palette,options:{mode:'cartoon',size:16,maxColors:12,preprocess:'custom',processing:{smoothing:25,sourceColors:48,mergeDistance:5,speckleArea:2,inkThreshold:90}}};
+  const a=convert(input),b=convert(input);assert.deepEqual(a.grid,b.grid);assert.ok(countColors(a.grid).length<=12);
+  const raw=convert({...input,options:{...input.options,processing:{...input.options.processing,mergeDistance:0,speckleArea:0}}});assert.deepEqual(a.grid.map(c=>c===null),raw.grid.map(c=>c===null));
 });
