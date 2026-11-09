@@ -8,21 +8,9 @@
 
 `npm test` 运行转换引擎测试，`npm run check` 检查 JavaScript 语法。`dist/` 可直接部署到支持 ES modules 和 Web Worker 的静态托管服务；请通过 HTTP 打开，不使用 `file://`。
 
-## EdgeOne 部署
-
-已部署到腾讯云中国站的 `shiliji-studio-20261106` 项目（ID：`makers-37ggfkppdxnl`）。[部署控制台](https://console.cloud.tencent.com/edgeone/pages/project/makers-37ggfkppdxnl/deployment/dprwu71by07m)。当前使用平台临时预览链接，过期后可从控制台重新生成；尚未绑定自定义域名。
-
-在本目录更新同一项目：
-
-```powershell
-npx --yes edgeone@1.6.47 makers deploy ./dist --name shiliji-studio-20261106 --env production --area global --json --skip-ai-gateway-sync
-```
-
-需要先通过 `npx --yes edgeone@1.6.47 login --site china` 登录。只上传 `dist/`，本地原图、工程样例和登录凭据不包含在部署中。
-
 ## Cloudflare Pages 部署
 
-另部署至 Cloudflare Pages 项目 `shiliji-studio-20261106`：[访问网站](https://shiliji-studio-20261106.pages.dev/)。与 EdgeOne 项目独立，尚未绑定自定义域名。
+已部署至 Cloudflare Pages 项目 `shiliji-studio-20261106`：[访问网站](https://shiliji-studio-20261106.pages.dev/)。尚未绑定自定义域名。
 
 更新此项目只需上传静态文件：
 
