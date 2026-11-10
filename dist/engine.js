@@ -1,7 +1,7 @@
 // Pure conversion engine: the worker and Node tests share this module.
 import {rgbToLab} from './color.js';
 import {preprocessImage} from './preprocess.js';
-import {recoverPixelGrid} from './pixel.js';
+import {recoverPixelGrid,samplePixelGrid} from './pixel.js';
 import {protectThinLines,accentWeights,refineRegions} from './refinement.js';
 export {rgbToLab} from './color.js';
 export function deltaE(a,b) {
@@ -33,7 +33,7 @@ export function removeBackground(data,w,h,tolerance=28) {
   return {data:out,removed:true,warning:''};
 }
 
-export function fitSubject(data,width,height,targetWidth,targetHeight) {
+export function fitSubject(data,width,height,targetWidth,targetHeight,pixelGrid=false) {
   // Locate substantial connected regions instead of using stray background dots as crop bounds.
   const labels=new Int32Array(width*height),queue=new Int32Array(width*height),parts=[];
   for(let i=0;i<labels.length;i++){
@@ -56,7 +56,8 @@ export function fitSubject(data,width,height,targetWidth,targetHeight) {
   const kept=parts.filter(p=>p===main||p.count>=main.count*.08||(p.count>=Math.max(4,main.count*.003)&&Math.hypot(Math.max(0,main.left-p.right,p.left-main.right),Math.max(0,main.top-p.bottom,p.top-main.bottom))<=reach));
   const left=Math.min(...kept.map(p=>p.left)),right=Math.max(...kept.map(p=>p.right)),top=Math.min(...kept.map(p=>p.top)),bottom=Math.max(...kept.map(p=>p.bottom));
   const unit=Math.max((right-left+1)/Math.max(1,targetWidth-2),(bottom-top+1)/Math.max(1,targetHeight-2));
-  const cropWidth=Math.ceil(unit*targetWidth),cropHeight=Math.ceil(unit*targetHeight);
+  const cropWidth=Math.ceil(pixelGrid?Math.max(right-left+3,(bottom-top+3)*targetWidth/targetHeight):unit*targetWidth);
+  const cropHeight=Math.ceil(pixelGrid?Math.max(bottom-top+3,(right-left+3)*targetHeight/targetWidth):unit*targetHeight);
   if(cropWidth>=width&&cropHeight>=height)return unchanged;
   const x0=Math.floor((left+right+1-cropWidth)/2),y0=Math.floor((top+bottom+1-cropHeight)/2),out=new Uint8ClampedArray(cropWidth*cropHeight*4);
   for(let y=0;y<cropHeight;y++){
@@ -124,6 +125,15 @@ export function cleanSpeckles(grid,w,h,palette) {
   return out;
 }
 
+function fitRecoveredPixels(recovered) {
+  const {width,height,cells}=recovered,data=new Uint8ClampedArray(width*height*4);
+  cells.forEach((c,i)=>{if(c)data.set([...c,255],i*4);});
+  const cropped=fitSubject(data,width,height,width,height,true);
+  if(!cropped.cropped)return {...recovered,fitted:false};
+  const result=Array.from({length:cropped.width*cropped.height},(_,i)=>cropped.data[i*4+3]<128?null:Array.from(cropped.data.subarray(i*4,i*4+3)));
+  return {...recovered,width:cropped.width,height:cropped.height,cells:result,fitted:true};
+}
+
 export function convert({data,width:sw,height:sh,options,palette}) {
   const {mode='cartoon',size=64,maxColors=18,outline=true,cleanup=true,background=false,fit=false,preprocess='off',processing={},pixelAuto=false}=options;
   if(!['photo','cartoon','structure','line','pixel'].includes(mode))throw Error('不支持的算法');
@@ -133,13 +143,18 @@ export function convert({data,width:sw,height:sh,options,palette}) {
   if(!Number.isFinite(mergeDistance)||mergeDistance<0||mergeDistance>15||!Number.isInteger(speckleArea)||speckleArea<0||speckleArea>8||!Number.isFinite(inkThreshold)||inkThreshold<45||inkThreshold>130)throw Error('精细处理参数无效');
   let w=Math.max(1,Math.round(sw/Math.max(sw,sh)*size)),h=Math.max(1,Math.round(sh/Math.max(sw,sh)*size));
   const bg=background?removeBackground(data,sw,sh):{data,warning:''};
-  const prepared=fit&&!(mode==='pixel'&&pixelAuto)?fitSubject(bg.data,sw,sh,w,h):{data:bg.data,width:sw,height:sh,cropped:false};
+  let recovered=mode==='pixel'&&pixelAuto?recoverPixelGrid(bg.data,sw,sh,w,h,true):null;
+  const fitGrid=fit&&recovered&&recovered.status!=='fallback';
+  const prepared=fit&&!fitGrid?fitSubject(bg.data,sw,sh,w,h):{data:bg.data,width:sw,height:sh,cropped:false};
   const preprocessed=preprocess==='off'||mode==='pixel'?null:{width:prepared.width,height:prepared.height,data:preprocessImage(prepared.data,prepared.width,prepared.height,preprocess,size,processing)};
   const input=preprocessed?.data||prepared.data;
   let cells;
   let pixelRecovery=null;
+  let fitted=prepared.cropped;
   if(mode==='pixel'){
-    const recovered=recoverPixelGrid(input,prepared.width,prepared.height,w,h,pixelAuto);
+    if(fitGrid){recovered=fitRecoveredPixels(recovered);fitted=recovered.fitted;}
+    else if(recovered&&prepared.cropped)recovered={...recovered,cells:samplePixelGrid(input,prepared.width,prepared.height,w,h)};
+    else if(!recovered)recovered=recoverPixelGrid(input,prepared.width,prepared.height,w,h,false);
     w=recovered.width;h=recovered.height;cells=recovered.cells;
     pixelRecovery={status:recovered.status,aligned:recovered.aligned,sampling:recovered.sampling};
   }else cells=mode==='structure'?structureSamples(input,prepared.width,prepared.height,w,h):tiles(input,prepared.width,prepared.height,w,h,mode,mode==='cartoon'?false:outline);
@@ -147,7 +162,7 @@ export function convert({data,width:sw,height:sh,options,palette}) {
   let grid=matchPalette(cells,palette,maxColors,mode==='cartoon'?accentWeights(cells,w,h):null);
   if(cleanup&&mode!=='pixel'&&mode!=='line')grid=cleanSpeckles(grid,w,h,palette);
   if(mode!=='pixel'&&mode!=='line'&&(mergeDistance||cleanup&&speckleArea))grid=refineRegions(grid,w,h,palette,deltaE,mergeDistance,cleanup?speckleArea:0);
-  return {width:w,height:h,grid,warning:bg.warning,mode,fitted:prepared.cropped,preprocess:mode==='pixel'?'off':preprocess,processing:{...processing},preprocessed,pixelRecovery};
+  return {width:w,height:h,grid,warning:bg.warning,mode,fitted,preprocess:mode==='pixel'?'off':preprocess,processing:{...processing},preprocessed,pixelRecovery};
 }
 
 export function keepLargestRegion(grid,width,height) {

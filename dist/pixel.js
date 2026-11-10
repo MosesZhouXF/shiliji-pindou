@@ -145,6 +145,12 @@ function representativeCell(data,sw,sh,x0,x1,y0,y1) {
   return chosen;
 }
 
+export function samplePixelGrid(data,sw,sh,width,height) {
+  const cells=[];
+  for(let row=0;row<height;row++)for(let col=0;col<width;col++)cells.push(representativeCell(data,sw,sh,col*sw/width,(col+1)*sw/width,row*sh/height,(row+1)*sh/height));
+  return cells;
+}
+
 export function recoverPixelGrid(data,sw,sh,width,height,auto=false) {
   const native=auto&&nativePixels(data,sw,sh),edges=native?null:edgeProjections(data,sw,sh);
   const xc=edges?detectAxis(edges.x):[],yc=edges?detectAxis(edges.y):[];
@@ -164,10 +170,8 @@ export function recoverPixelGrid(data,sw,sh,width,height,auto=false) {
     if(quality.consistent<.85||quality.error>16){xs=null;ys=null;}
   }
   const cells=[];aligned=!!(xs||ys);
+  if(status==='fallback')return {width,height,cells:samplePixelGrid(data,sw,sh,width,height),status,aligned:false,sampling:'representative'};
   for(let row=0;row<height;row++)for(let col=0;col<width;col++){
-    if(status==='fallback'){
-      cells.push(representativeCell(data,sw,sh,col*sw/width,(col+1)*sw/width,row*sh/height,(row+1)*sh/height));continue;
-    }
     const cx=Math.min(sw-1,Math.max(0,Math.floor(xs?(xs[col]+xs[col+1])/2:(col+.5)*sw/width)));
     const cy=Math.min(sh-1,Math.max(0,Math.floor(ys?(ys[row]+ys[row+1])/2:(row+.5)*sh/height))),i=(cy*sw+cx)*4;
     cells.push(data[i+3]<128?null:Array.from(data.subarray(i,i+3)));
