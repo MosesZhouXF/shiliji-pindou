@@ -1,6 +1,7 @@
 // Pure conversion engine: the worker and Node tests share this module.
 import {rgbToLab} from './color.js';
 import {preprocessImage} from './preprocess.js';
+import {recoverPixelGrid} from './pixel.js';
 import {protectThinLines,accentWeights,refineRegions} from './refinement.js';
 export {rgbToLab} from './color.js';
 export function deltaE(a,b) {
@@ -124,23 +125,29 @@ export function cleanSpeckles(grid,w,h,palette) {
 }
 
 export function convert({data,width:sw,height:sh,options,palette}) {
-  const {mode='cartoon',size=64,maxColors=18,outline=true,cleanup=true,background=false,fit=false,preprocess='off',processing={}}=options;
+  const {mode='cartoon',size=64,maxColors=18,outline=true,cleanup=true,background=false,fit=false,preprocess='off',processing={},pixelAuto=false}=options;
   if(!['photo','cartoon','structure','line','pixel'].includes(mode))throw Error('不支持的算法');
   if(!['off','light','standard','strong','custom'].includes(preprocess))throw Error('不支持的原图预处理强度');
   if(!Number.isInteger(size)||size<8||size>192||!Number.isInteger(maxColors)||maxColors<1||maxColors>291||!sw||!sh||data.length!==sw*sh*4)throw Error('转换参数无效');
   const {mergeDistance=0,speckleArea=0,inkThreshold=90}=processing;
   if(!Number.isFinite(mergeDistance)||mergeDistance<0||mergeDistance>15||!Number.isInteger(speckleArea)||speckleArea<0||speckleArea>8||!Number.isFinite(inkThreshold)||inkThreshold<45||inkThreshold>130)throw Error('精细处理参数无效');
-  const w=Math.max(1,Math.round(sw/Math.max(sw,sh)*size)),h=Math.max(1,Math.round(sh/Math.max(sw,sh)*size));
+  let w=Math.max(1,Math.round(sw/Math.max(sw,sh)*size)),h=Math.max(1,Math.round(sh/Math.max(sw,sh)*size));
   const bg=background?removeBackground(data,sw,sh):{data,warning:''};
-  const prepared=fit?fitSubject(bg.data,sw,sh,w,h):{data:bg.data,width:sw,height:sh,cropped:false};
-  const preprocessed=preprocess==='off'?null:{width:prepared.width,height:prepared.height,data:preprocessImage(prepared.data,prepared.width,prepared.height,preprocess,size,processing)};
+  const prepared=fit&&!(mode==='pixel'&&pixelAuto)?fitSubject(bg.data,sw,sh,w,h):{data:bg.data,width:sw,height:sh,cropped:false};
+  const preprocessed=preprocess==='off'||mode==='pixel'?null:{width:prepared.width,height:prepared.height,data:preprocessImage(prepared.data,prepared.width,prepared.height,preprocess,size,processing)};
   const input=preprocessed?.data||prepared.data;
-  let cells=mode==='structure'?structureSamples(input,prepared.width,prepared.height,w,h):tiles(input,prepared.width,prepared.height,w,h,mode,mode==='cartoon'?false:outline);
+  let cells;
+  let pixelRecovery=null;
+  if(mode==='pixel'){
+    const recovered=recoverPixelGrid(input,prepared.width,prepared.height,w,h,pixelAuto);
+    w=recovered.width;h=recovered.height;cells=recovered.cells;
+    pixelRecovery={status:recovered.status,aligned:recovered.aligned,sampling:recovered.sampling};
+  }else cells=mode==='structure'?structureSamples(input,prepared.width,prepared.height,w,h):tiles(input,prepared.width,prepared.height,w,h,mode,mode==='cartoon'?false:outline);
   if(mode==='cartoon'&&outline)cells=protectThinLines(cells,input,prepared.width,prepared.height,w,h,inkThreshold);
   let grid=matchPalette(cells,palette,maxColors,mode==='cartoon'?accentWeights(cells,w,h):null);
   if(cleanup&&mode!=='pixel'&&mode!=='line')grid=cleanSpeckles(grid,w,h,palette);
   if(mode!=='pixel'&&mode!=='line'&&(mergeDistance||cleanup&&speckleArea))grid=refineRegions(grid,w,h,palette,deltaE,mergeDistance,cleanup?speckleArea:0);
-  return {width:w,height:h,grid,warning:bg.warning,mode,fitted:prepared.cropped,preprocess,processing:{...processing},preprocessed};
+  return {width:w,height:h,grid,warning:bg.warning,mode,fitted:prepared.cropped,preprocess:mode==='pixel'?'off':preprocess,processing:{...processing},preprocessed,pixelRecovery};
 }
 
 export function keepLargestRegion(grid,width,height) {
@@ -196,6 +203,72 @@ export function addOutline(grid,width,height,code) {
       const xx=x+dx,yy=y+dy;if(xx>=0&&yy>=0&&xx<width&&yy<height&&grid[yy*width+xx]!==null){touches=true;break;}
     }
     if(touches)out[i]=code;
+  }
+  return out;
+}
+
+export function repairOutline(grid,width,height,palette) {
+  const out=grid.slice(),{exterior}=exteriorCells(grid,width,height);
+  const colors=new Map(palette.map(p=>[p.code,rgbToLab(p.rgb)])),ink=new Uint8Array(grid.length),rim=new Uint8Array(grid.length),labels=new Int32Array(grid.length);
+  const at=(x,y)=>x>=0&&y>=0&&x<width&&y<height?y*width+x:-1;
+  const outside=(x,y)=>{const i=at(x,y);return i<0||!!exterior[i];};
+  const directions=[[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
+  for(let i=0;i<grid.length;i++){
+    if(grid[i]===null)continue;
+    rim[i]=[[0,-1],[-1,0],[1,0],[0,1]].some(([dx,dy])=>outside(i%width+dx,Math.floor(i/width)+dy))?1:0;
+  }
+  // Count each exterior boundary cell once; interior fills and enclosed holes do
+  // not vote. All repairs use this boundary majority, regardless of local shade.
+  const stroke=countColors(grid.filter((_,i)=>rim[i]))[0]?.code;
+  if(!stroke)return out;
+  for(let i=0;i<grid.length;i++)ink[i]=grid[i]===stroke||colors.get(grid[i])?.[0]<=45?1:0;
+  // Never bridge separate foreground pieces, even if their ink colors match.
+  let component=0;
+  for(let i=0;i<grid.length;i++){
+    if(grid[i]===null||labels[i])continue;
+    const queue=[i];labels[i]=++component;
+    for(let n=0;n<queue.length;n++)for(const [dx,dy]of directions){
+      const j=at(queue[n]%width+dx,Math.floor(queue[n]/width)+dy);
+      if(j>=0&&grid[j]!==null&&!labels[j]){labels[j]=component;queue.push(j);}
+    }
+  }
+  const similar=(a,b)=>a===b||deltaE(colors.get(a),colors.get(b))<=10;
+  const eligible=i=>i>=0&&!ink[i]&&(rim[i]||exterior[i]);
+  for(let i=0;i<grid.length;i++){
+    if(!eligible(i))continue;
+    const x=i%width,y=Math.floor(i/width),ends=[];
+    for(const [dx,dy]of directions){
+      for(let distance=1;distance<=4;distance++){
+        const j=at(x+dx*distance,y+dy*distance);if(j<0)break;
+        if(ink[j]){
+          const supported=directions.some(([sx,sy])=>{
+            if(sx*dx+sy*dy<=0)return false;
+            const support=at(x+dx*distance+sx,y+dy*distance+sy);
+            return support>=0&&rim[support]&&ink[support]&&similar(grid[j],grid[support]);
+          });
+          if(rim[j]&&supported)ends.push({j,dx,dy,distance});
+          break;
+        }
+        if(!eligible(j))break;
+      }
+    }
+    let chosen=null,best=Infinity;
+    for(let a=0;a<ends.length;a++)for(let b=a+1;b<ends.length;b++){
+      const left=ends[a],right=ends[b],gap=left.distance+right.distance-1;
+      if(gap>3||labels[left.j]!==labels[right.j]||!similar(grid[left.j],grid[right.j]))continue;
+      let nx,ny,turn=false;
+      if(left.dx===-right.dx&&left.dy===-right.dy){nx=-left.dy;ny=left.dx;}
+      else if(gap===1&&left.dx!==right.dx&&left.dy!==right.dy&&left.dx*right.dx+left.dy*right.dy<=0){nx=Math.sign(left.dx+right.dx);ny=Math.sign(left.dy+right.dy);turn=true;}
+      else continue;
+      const sideA=at(x+nx,y+ny),sideB=at(x-nx,y-ny);
+      // A real outer contour has foreground on one side and exterior on the other.
+      if(turn&&(sideA<0||grid[sideA]===null||ink[sideA]||!outside(x-nx,y-ny)))continue;
+      if(!((sideA>=0&&grid[sideA]!==null&&outside(x-nx,y-ny))||(sideB>=0&&grid[sideB]!==null&&outside(x+nx,y+ny))))continue;
+      const code=stroke;
+      if(grid[i]!==null&&colors.get(grid[i])[0]-colors.get(code)[0]<12)continue;
+      if(gap<best){best=gap;chosen=code;}
+    }
+    if(chosen)out[i]=chosen;
   }
   return out;
 }
